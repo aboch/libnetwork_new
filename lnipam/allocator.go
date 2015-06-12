@@ -4,6 +4,7 @@ package lnipam
 import (
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/docker/libnetwork/ipam"
 	"github.com/docker/libnetwork/rleseq"
@@ -27,6 +28,7 @@ type Allocator struct {
 	subnetsInfo map[subnetKey]*subnetData
 	// Allocated addresses in each address space's internal subnet
 	addresses map[isKey]*bitmask
+	sync.Mutex
 }
 
 // NewAllocator returns an instance of libnetwork ipam
@@ -101,7 +103,9 @@ func (a *Allocator) AddSubnet(addrSpace ipam.AddressSpace, subnetInfo *ipam.Subn
 	// Store the configured subnet information
 	subnetKey := subnetKey{addrSpace, subnetInfo.Subnet.String()}
 	info := &subnetData{info: subnetInfo, intSubKeyes: make([]*isKey, len(subnetList))}
+	a.Lock()
 	a.subnetsInfo[subnetKey] = info
+	a.Unlock()
 
 	// Create and insert the internal subnet(s) addresses masks into the address database
 	for i, sub := range subnetList {
@@ -113,11 +117,13 @@ func (a *Allocator) AddSubnet(addrSpace ipam.AddressSpace, subnetInfo *ipam.Subn
 		info.intSubKeyes[i] = smallKey
 
 		// Add the new address masks
+		a.Lock()
 		a.addresses[*smallKey] = &bitmask{
 			subnet:        sub,
 			addressMask:   rleseq.New(uint32(numAddresses)),
 			freeAddresses: numAddresses,
 		}
+		a.Unlock()
 	}
 
 	return nil
@@ -145,6 +151,8 @@ func adjustAndCheckSubnetSize(subnet *net.IPNet) (*net.IPNet, error) {
 
 // Checks whether the passed subnet is a superset or subset of any of the subset in the db
 func (a *Allocator) contains(space ipam.AddressSpace, subInfo *ipam.SubnetInfo) bool {
+	a.Lock()
+	defer a.Unlock()
 	for k, v := range a.subnetsInfo {
 		if space == k.addressSpace {
 			if subInfo.Subnet.Contains(v.info.Subnet.IP) ||
@@ -202,16 +210,22 @@ func (a *Allocator) RemoveSubnet(addrSpace ipam.AddressSpace, subnet *net.IPNet)
 	// Look for the respective subnet configuration data
 	// Remove it along with the internal subnets
 	subKey := subnetKey{addrSpace, subnet.String()}
+	a.Lock()
 	subData, ok := a.subnetsInfo[subKey]
+	a.Unlock()
 	if !ok {
 		return ipam.ErrSubnetNotFound
 	}
 
 	for _, key := range subData.intSubKeyes {
+		a.Lock()
 		delete(a.addresses, *key)
+		a.Unlock()
 	}
 
+	a.Lock()
 	delete(a.subnetsInfo, subKey)
+	a.Unlock()
 
 	return nil
 
@@ -261,7 +275,9 @@ func (a *Allocator) request(addrSpace ipam.AddressSpace, req *ipam.AddressReques
 	if err == nil {
 		// Populate response
 		response.Address = ip
+		a.Lock()
 		response.Subnet = *a.subnetsInfo[subnetKey{addrSpace, req.Subnet.String()}].info
+		a.Unlock()
 	}
 
 	return response, err
@@ -295,16 +311,22 @@ func (a *Allocator) reserveAddress(addrSpace ipam.AddressSpace, subnet *net.IPNe
 
 	// Get the list of pointers to the internal subnets
 	if subnet != nil {
+		a.Lock()
 		keyList = a.subnetsInfo[subnetKey{addrSpace, subnet.String()}].intSubKeyes
+		a.Unlock()
 	} else {
+		a.Lock()
 		keyList = a.getSubnetList(addrSpace, ver)
+		a.Unlock()
 	}
 	if len(keyList) == 0 {
 		return nil, nil, ipam.ErrNoAvailableSubnet
 	}
 
 	for _, key := range keyList {
+		a.Lock()
 		smallSubnet := a.addresses[*key]
+		a.Unlock()
 		address, err := a.getAddress(smallSubnet, prefAddress, ver)
 		if err == nil {
 			return address, subnet, nil
@@ -318,6 +340,7 @@ func (a *Allocator) reserveAddress(addrSpace ipam.AddressSpace, subnet *net.IPNe
 func (a *Allocator) getSubnetList(addrSpace ipam.AddressSpace, ver ipVersion) []*isKey {
 	var list [1024]*isKey
 	ind := 0
+	a.Lock()
 	for subKey := range a.addresses {
 		_, s, _ := net.ParseCIDR(subKey.subnet)
 		subVer := getAddressVersion(s.IP)
@@ -326,6 +349,7 @@ func (a *Allocator) getSubnetList(addrSpace ipam.AddressSpace, ver ipVersion) []
 			ind++
 		}
 	}
+	a.Unlock()
 	return list[0:ind]
 }
 
@@ -366,6 +390,8 @@ again:
 
 // DumpDatabase dumps the internal info
 func (a *Allocator) DumpDatabase() {
+	a.Lock()
+	defer a.Unlock()
 	for _, config := range a.subnetsInfo {
 		fmt.Printf("\n\n%s:", config.info.Subnet.String())
 		for _, internKey := range config.intSubKeyes {
