@@ -357,6 +357,7 @@ func (a *Allocator) getSubnetList(addrSpace ipam.AddressSpace, ver ipVersion) []
 func (a *Allocator) getAddress(smallSubnet *bitmask, prefAddress net.IP, ver ipVersion) (net.IP, error) {
 	var (
 		bytePos, bitPos int
+		err             error
 	)
 	// Look for free IP, skip .0 and .255, they will be automatically reserved
 again:
@@ -364,12 +365,12 @@ again:
 		return nil, ipam.ErrNoAvailableIPs
 	}
 	if prefAddress == nil {
-		bytePos, bitPos = smallSubnet.addressMask.GetFirstAvailable()
+		bytePos, bitPos, err = smallSubnet.addressMask.GetFirstAvailable()
 	} else {
 		ordinal := ipToInt(getHostPortionIP(prefAddress, smallSubnet.subnet))
-		bytePos, bitPos = smallSubnet.addressMask.CheckIfAvailable(ordinal)
+		bytePos, bitPos, err = smallSubnet.addressMask.CheckIfAvailable(ordinal)
 	}
-	if bytePos == -1 {
+	if err != nil {
 		return nil, ipam.ErrNoAvailableIPs
 	}
 
