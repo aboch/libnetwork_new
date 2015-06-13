@@ -463,10 +463,10 @@ func assertGetAddress(t *testing.T, subnet string) {
 
 	bm := &bitmask{
 		subnet:        sub,
-		addressMask:   rleseq.New(uint32(numAddresses)),
+		addressMask:   rleseq.NewHandle("default/192.168.0.0/24", uint32(numAddresses)),
 		freeAddresses: numAddresses,
 	}
-	numBlocks := bm.addressMask.Count
+	numBlocks := bm.addressMask.Head.Count
 
 	start := time.Now()
 	run := 0
@@ -477,9 +477,9 @@ func assertGetAddress(t *testing.T, subnet string) {
 	if printTime {
 		fmt.Printf("\nTaken %v, to allocate all addresses on %s. (nemAddresses: %d. Runs: %d)", time.Since(start), subnet, numAddresses, run)
 	}
-	if bm.addressMask.Block != expectedMax || bm.addressMask.Count != numBlocks {
+	if bm.addressMask.Head.Block != expectedMax || bm.addressMask.Head.Count != numBlocks {
 		t.Fatalf("Failed to effectively reserve all addresses on %s. Expected (0x%x, %d) as first sequence. Found (0x%x,%d)",
-			subnet, expectedMax, numBlocks, bm.addressMask.Block, bm.addressMask.Count)
+			subnet, expectedMax, numBlocks, bm.addressMask.Head.Block, bm.addressMask.Head.Count)
 	}
 }
 

@@ -54,7 +54,7 @@ func (s *subnetKey) String() string {
 // The bitmask is stored a run-length encoded seq.Sequence of 4 bytes blcoks.
 type bitmask struct {
 	subnet        *net.IPNet
-	addressMask   *rleseq.Sequence
+	addressMask   *rleseq.Handle
 	freeAddresses int
 }
 
@@ -104,7 +104,7 @@ func (a *Allocator) AddSubnet(addrSpace ipam.AddressSpace, subnetInfo *ipam.Subn
 		a.Lock()
 		a.addresses[smallKey] = &bitmask{
 			subnet:        sub,
-			addressMask:   rleseq.New(uint32(numAddresses)),
+			addressMask:   rleseq.NewHandle(smallKey.String(), uint32(numAddresses)),
 			freeAddresses: numAddresses,
 		}
 		a.Unlock()
@@ -295,7 +295,7 @@ func (a *Allocator) Release(addrSpace ipam.AddressSpace, address net.IP) {
 			space := a.addresses[subnetKey{addrSpace, sub.String()}]
 			ordinal := ipToInt(getHostPortionIP(address, space.subnet))
 			// Release it
-			space.addressMask = rleseq.PushReservation(ordinal/8, ordinal%8, space.addressMask, true)
+			space.addressMask.PushReservation(ordinal/8, ordinal%8, true)
 			space.freeAddresses++
 			return
 		}
@@ -364,17 +364,17 @@ again:
 		return nil, ipam.ErrNoAvailableIPs
 	}
 	if prefAddress == nil {
-		bytePos, bitPos = rleseq.GetFirstAvailable(smallSubnet.addressMask)
+		bytePos, bitPos = smallSubnet.addressMask.GetFirstAvailable()
 	} else {
 		ordinal := ipToInt(getHostPortionIP(prefAddress, smallSubnet.subnet))
-		bytePos, bitPos = rleseq.CheckIfAvailable(smallSubnet.addressMask, ordinal)
+		bytePos, bitPos = smallSubnet.addressMask.CheckIfAvailable(ordinal)
 	}
 	if bytePos == -1 {
 		return nil, ipam.ErrNoAvailableIPs
 	}
 
 	// Lock it
-	smallSubnet.addressMask = rleseq.PushReservation(bytePos, bitPos, smallSubnet.addressMask, false)
+	smallSubnet.addressMask.PushReservation(bytePos, bitPos, false)
 	smallSubnet.freeAddresses--
 
 	// Build IP ordinal
