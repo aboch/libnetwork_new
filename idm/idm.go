@@ -4,6 +4,7 @@ package idm
 import (
 	"fmt"
 
+	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/rleseq"
 )
 
@@ -15,14 +16,14 @@ type Idm struct {
 }
 
 // New returns an instance of id manager for a set of [start-end] numerical ids
-func New(id string, start, end int) (*Idm, error) {
+func New(ds datastore.DataStore, id string, start, end int) (*Idm, error) {
 	if id == "" {
 		return nil, fmt.Errorf("Invalid id")
 	}
 	if end-start <= 0 {
 		return nil, fmt.Errorf("Invalid set range: [%d, %d]", start, end)
 	}
-	return &Idm{start: start, end: end, handle: rleseq.NewHandle(id, uint32(1+end-start))}, nil
+	return &Idm{start: start, end: end, handle: rleseq.NewHandle("idm", ds, id, uint32(1+end-start))}, nil
 }
 
 // GetID returns the first available id in the set

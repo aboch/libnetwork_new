@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/ipam"
 	"github.com/docker/libnetwork/rleseq"
 )
@@ -28,11 +29,13 @@ type Allocator struct {
 	subnetsInfo map[subnetKey]*ipam.SubnetInfo
 	// Allocated addresses in each address space's internal subnet
 	addresses map[subnetKey]*bitmask
+	// Datastore
+	store datastore.DataStore
 	sync.Mutex
 }
 
 // NewAllocator returns an instance of libnetwork ipam
-func NewAllocator() *Allocator {
+func NewAllocator(ds datastore.DataStore) *Allocator {
 	a := &Allocator{}
 	a.subnetsInfo = make(map[subnetKey]*ipam.SubnetInfo)
 	a.addresses = make(map[subnetKey]*bitmask)
@@ -104,7 +107,7 @@ func (a *Allocator) AddSubnet(addrSpace ipam.AddressSpace, subnetInfo *ipam.Subn
 		a.Lock()
 		a.addresses[smallKey] = &bitmask{
 			subnet:        sub,
-			addressMask:   rleseq.NewHandle(smallKey.String(), uint32(numAddresses)),
+			addressMask:   rleseq.NewHandle("ipam", a.store, smallKey.String(), uint32(numAddresses)),
 			freeAddresses: numAddresses,
 		}
 		a.Unlock()

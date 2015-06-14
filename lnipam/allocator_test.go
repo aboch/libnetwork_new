@@ -11,7 +11,7 @@ import (
 )
 
 func getAllocator(subnet *net.IPNet) *Allocator {
-	a := NewAllocator()
+	a := NewAllocator(nil)
 	a.AddSubnet("default", &ipam.SubnetInfo{Subnet: subnet})
 	return a
 }
@@ -59,7 +59,7 @@ func TestGetAddressVersion(t *testing.T) {
 }
 
 func TestAddSubnets(t *testing.T) {
-	a := NewAllocator()
+	a := NewAllocator(nil)
 
 	_, sub0, _ := net.ParseCIDR("10.0.0.0/8")
 	err := a.AddSubnet("default", &ipam.SubnetInfo{Subnet: sub0})
@@ -134,7 +134,7 @@ func TestAdjustAndCheckSubnet(t *testing.T) {
 }
 
 func TestRemoveSubnet(t *testing.T) {
-	a := NewAllocator()
+	a := NewAllocator(nil)
 
 	input := []struct {
 		addrSpace ipam.AddressSpace
@@ -248,7 +248,7 @@ func TestGetAddress(t *testing.T) {
 }
 
 func TestGetSubnetList(t *testing.T) {
-	a := NewAllocator()
+	a := NewAllocator(nil)
 	input := []struct {
 		addrSpace ipam.AddressSpace
 		subnet    string
@@ -296,7 +296,7 @@ func TestGetSubnetList(t *testing.T) {
 
 func TestRequestSyntaxCheck(t *testing.T) {
 	var (
-		a        = NewAllocator()
+		a        = NewAllocator(nil)
 		subnet   = "192.168.0.0/16"
 		addSpace = ipam.AddressSpace("green")
 	)
@@ -463,7 +463,7 @@ func assertGetAddress(t *testing.T, subnet string) {
 
 	bm := &bitmask{
 		subnet:        sub,
-		addressMask:   rleseq.NewHandle("default/192.168.0.0/24", uint32(numAddresses)),
+		addressMask:   rleseq.NewHandle("ipam_test", nil, "default/192.168.0.0/24", uint32(numAddresses)),
 		freeAddresses: numAddresses,
 	}
 	numBlocks := bm.addressMask.Head.Count
@@ -514,7 +514,7 @@ func assertNRequests(t *testing.T, subnet string, numReq int, lastExpectedIP str
 func benchmarkRequest(subnet *net.IPNet) {
 	var err error
 
-	a := NewAllocator()
+	a := NewAllocator(nil)
 	a.internalHostSize = 20
 	a.AddSubnet("default", &ipam.SubnetInfo{Subnet: subnet})
 
