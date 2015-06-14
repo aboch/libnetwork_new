@@ -234,6 +234,12 @@ type BadRequestError interface {
 	BadRequest()
 }
 
+// RetryError is an interface for errors which might get resolved through retry
+type RetryError interface {
+	// Retry makes implementer into RetryError type
+	Retry()
+}
+
 // NotFoundError is an interface for errors raised because a needed resource is not available
 type NotFoundError interface {
 	// NotFound makes implementer into NotFoundError type
@@ -271,12 +277,17 @@ type InternalError interface {
 }
 
 /******************************
- * Weel-known Error Formatters
+ * Well-known Error Formatters
  ******************************/
 
 // BadRequestErrorf creates an instance of BadRequestError
 func BadRequestErrorf(format string, params ...interface{}) error {
 	return badRequest(fmt.Sprintf(format, params...))
+}
+
+// RetryErrorf creates an instance of RetryError
+func RetryErrorf(format string, params ...interface{}) error {
+	return retry(fmt.Sprintf(format, params...))
 }
 
 // NotFoundErrorf creates an instance of NotFoundError
@@ -323,6 +334,13 @@ func (br badRequest) Error() string {
 	return string(br)
 }
 func (br badRequest) BadRequest() {}
+
+type retry string
+
+func (r retry) Error() string {
+	return string(r)
+}
+func (r retry) Retry() {}
 
 type maskBadRequest string
 
