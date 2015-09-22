@@ -27,7 +27,7 @@ func testMain(m *testing.M) {
 }
 
 func getAllocator(t *testing.T, subnet *net.IPNet) *Allocator {
-	a, err := NewAllocator(ds)
+	a, err := NewAllocator(nil, ds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestKeyString(t *testing.T) {
 }
 
 func TestAddSubnets(t *testing.T) {
-	a, err := NewAllocator(nil)
+	a, err := NewAllocator(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestAdjustAndCheckSubnet(t *testing.T) {
 }
 
 func TestRemoveSubnet(t *testing.T) {
-	a, err := NewAllocator(nil)
+	a, err := NewAllocator(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestGetInternalSubnets(t *testing.T) {
 }
 
 func TestGetSameAddress(t *testing.T) {
-	a, err := NewAllocator(nil)
+	a, err := NewAllocator(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestGetAddress(t *testing.T) {
 }
 
 func TestGetSubnetList(t *testing.T) {
-	a, err := NewAllocator(nil)
+	a, err := NewAllocator(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestRequestSyntaxCheck(t *testing.T) {
 		addSpace = AddressSpace("green")
 	)
 
-	a, err := NewAllocator(nil)
+	a, err := NewAllocator(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func assertNRequests(t *testing.T, subnet string, numReq int, lastExpectedIP str
 func benchmarkRequest(subnet *net.IPNet) {
 	var err error
 
-	a, _ := NewAllocator(nil)
+	a, _ := NewAllocator(nil, nil)
 	a.internalHostSize = 20
 	a.AddSubnet("default", &SubnetInfo{Subnet: subnet})
 
