@@ -22,7 +22,7 @@ const (
 // Callback provides a Callback interface for registering an IPAM instance into LibNetwork
 type Callback interface {
 	// RegisterDriver provides a way for Remote drivers to dynamically register new NetworkType and associate with a ipam instance
-	RegisterIpam(name string, allocator Ipam) error
+	RegisterIpamDriver(name string, driver Ipam) error
 }
 
 /**************

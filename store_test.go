@@ -139,7 +139,7 @@ func TestLocalStoreLockTimeout(t *testing.T) {
 	}
 	defer ctrl1.Stop()
 	// Use the same boltdb file without closing the previous controller
-	ctrl2, _ := New(cfgOptions...)
+	ctrl2, err := New(cfgOptions...)
 	if err != nil {
 		t.Fatalf("Error new controller: %v", err)
 	}

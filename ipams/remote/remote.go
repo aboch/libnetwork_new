@@ -29,7 +29,7 @@ func newAllocator(name string, client *plugins.Client) ipamapi.Ipam {
 // Init registers a remote ipam when its plugin is activated
 func Init(cb ipamapi.Callback, l, g interface{}) error {
 	plugins.Handle(ipamapi.PluginEndpointType, func(name string, client *plugins.Client) {
-		if err := cb.RegisterIpam(name, newAllocator(name, client)); err != nil {
+		if err := cb.RegisterIpamDriver(name, newAllocator(name, client)); err != nil {
 			log.Errorf("error registering remote ipam %s due to %v", name, err)
 		}
 	})

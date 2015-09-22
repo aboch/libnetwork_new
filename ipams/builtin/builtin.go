@@ -31,5 +31,5 @@ func Init(ic ipamapi.Callback, l, g interface{}) error {
 		return err
 	}
 
-	return ic.RegisterIpam(ipamapi.DefaultIPAM, a)
+	return ic.RegisterIpamDriver(ipamapi.DefaultIPAM, a)
 }
