@@ -56,6 +56,7 @@ import (
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/hostdiscovery"
+	"github.com/docker/libnetwork/ipamapi"
 	"github.com/docker/libnetwork/osl"
 	"github.com/docker/libnetwork/types"
 )
@@ -114,7 +115,15 @@ type driverData struct {
 	capability driverapi.Capability
 }
 
+type ipamData struct {
+	config    ipamapi.Config
+	allocator ipamapi.Allocator
+	// default address spaces are provided by ipam driver at registration time
+	defaultLocalAddressSpace, defaultGlobalAddressSpace string
+}
+
 type driverTable map[string]*driverData
+type ipamTable map[string]*ipamData
 type networkTable map[string]*network
 type endpointTable map[string]*endpoint
 type sandboxTable map[string]*sandbox
@@ -123,6 +132,7 @@ type controller struct {
 	id                      string
 	networks                networkTable
 	drivers                 driverTable
+	ipams                   ipamTable
 	sandboxes               sandboxTable
 	cfg                     *config.Config
 	globalStore, localStore datastore.DataStore
@@ -146,7 +156,8 @@ func New(cfgOptions ...config.Option) (NetworkController, error) {
 		cfg:       cfg,
 		networks:  networkTable{},
 		sandboxes: sandboxTable{},
-		drivers:   driverTable{}}
+		drivers:   driverTable{},
+		ipams:     ipamTable{}}
 	if err := initDrivers(c); err != nil {
 		return nil, err
 	}
@@ -157,13 +168,26 @@ func New(cfgOptions ...config.Option) (NetworkController, error) {
 			// But it cannot fail creating the Controller
 			log.Debugf("Failed to Initialize Datastore due to %v. Operating in non-clustered mode", err)
 		}
+		if err := c.initLocalStore(); err != nil {
+			return nil, fmt.Errorf("Failed to Initialize LocalDatastore due to %v.", err)
+		}
+	}
+
+	if err := initIpams(c, c.globalStore); err != nil {
+		return nil, err
+	}
+
+	if cfg != nil {
+		if err := c.restoreFromGlobalStore(); err != nil {
+			log.Debugf("Failed to restore from global Datastore due to %v", err)
+		}
 		if err := c.initDiscovery(); err != nil {
 			// Failing to initalize discovery is a bad situation to be in.
 			// But it cannot fail creating the Controller
 			log.Debugf("Failed to Initialize Discovery : %v", err)
 		}
-		if err := c.initLocalStore(); err != nil {
-			return nil, fmt.Errorf("Failed to Initialize LocalDatastore due to %v.", err)
+		if err := c.restoreFromLocalStore(); err != nil {
+			log.Debugf("Failed to restore from local Datastore due to %v", err)
 		}
 	}
 
@@ -225,6 +249,28 @@ func (c *controller) RegisterDriver(networkType string, driver driverapi.Driver,
 	return nil
 }
 
+func (c *controller) RegisterIpam(name string, ipConfig ipamapi.Config, ipAllocator ipamapi.Allocator) error {
+	if !config.IsValidName(name) {
+		return ErrInvalidName(name)
+	}
+
+	c.Lock()
+	if _, ok := c.ipams[name]; ok {
+		c.Unlock()
+		return driverapi.ErrActiveRegistration(name)
+	}
+	l, g, err := ipConfig.GetDefaultAddressSpaces()
+	if err != nil {
+		return fmt.Errorf("ipam driver %s failed to return default address spaces: %v", name, err)
+	}
+	c.ipams[name] = &ipamData{config: ipConfig, allocator: ipAllocator, defaultLocalAddressSpace: l, defaultGlobalAddressSpace: g}
+	c.Unlock()
+
+	log.Debugf("Registering ipam provider: %s", name)
+
+	return nil
+}
+
 // NewNetwork creates a new network of the specified network type. The options
 // are network specific and modeled in a generic way.
 func (c *controller) NewNetwork(networkType, name string, options ...NetworkOption) (Network, error) {
@@ -245,6 +291,7 @@ func (c *controller) NewNetwork(networkType, name string, options ...NetworkOpti
 	network := &network{
 		name:        name,
 		networkType: networkType,
+		ipamType:    ipamapi.DefaultIPAM,
 		id:          stringid.GenerateRandomID(),
 		ctrlr:       c,
 		endpoints:   endpointTable{},
@@ -269,7 +316,6 @@ func (c *controller) NewNetwork(networkType, name string, options ...NetworkOpti
 }
 
 func (c *controller) addNetwork(n *network) error {
-
 	c.Lock()
 	// Check if a driver for the specified network type is available
 	dd, ok := c.drivers[n.networkType]
@@ -279,6 +325,17 @@ func (c *controller) addNetwork(n *network) error {
 		var err error
 		dd, err = c.loadDriver(n.networkType)
 		if err != nil {
+			return err
+		}
+	}
+
+	c.Lock()
+	// Load the ipam driver if not done already
+	_, ok = c.ipams[n.ipamType]
+	c.Unlock()
+
+	if !ok {
+		if _, err := c.loadIpam(n.ipamType); err != nil {
 			return err
 		}
 	}
@@ -485,6 +542,44 @@ func (c *controller) loadDriver(networkType string) (*driverData, error) {
 		return nil, ErrInvalidNetworkDriver(networkType)
 	}
 	return dd, nil
+}
+
+func (c *controller) loadIpam(name string) (*ipamData, error) {
+	if _, err := plugins.Get(name, ipamapi.PluginEndpointType); err != nil {
+		if err == plugins.ErrNotFound {
+			return nil, types.NotFoundErrorf(err.Error())
+		}
+		return nil, err
+	}
+	c.Lock()
+	id, ok := c.ipams[name]
+	c.Unlock()
+	if !ok {
+		return nil, ErrInvalidNetworkDriver(name)
+	}
+	return id, nil
+}
+
+func (c *controller) getIPConfig(name string) (ipamapi.Config, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	ip, ok := c.ipams[name]
+	if !ok {
+		return nil, types.NotFoundErrorf("no ip config found with ipam name: %s", name)
+	}
+	return ip.config, nil
+}
+
+func (c *controller) getIPAllocator(name string) (ipamapi.Allocator, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	ip, ok := c.ipams[name]
+	if !ok {
+		return nil, types.NotFoundErrorf("no ip allocator found with ipam name: %s", name)
+	}
+	return ip.allocator, nil
 }
 
 func (c *controller) Stop() {
