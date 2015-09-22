@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	localAddressSpace  = "LocalDefault"
+	globalAddressSpace = "GlobalDefault"
 	// The biggest configurable host subnets
 	minNetSize   = 8
 	minNetSizeV6 = 64
@@ -162,6 +164,21 @@ const (
 /*******************
  * IPAMConf Contract
  ********************/
+
+// GetDefaultAddressSpaces returns the local and global default address spaces
+func (a *Allocator) GetDefaultAddressSpaces() (string, string, error) {
+	return localAddressSpace, globalAddressSpace, nil
+}
+
+// RequestPool returns an address pool along with its unique id.
+func (a *Allocator) RequestPool(addressSpace, pool, subPool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
+	return "", nil, nil, types.NotImplementedErrorf("not implemented yet")
+}
+
+// ReleasePool releases the address pool identified by the passed id
+func (a *Allocator) ReleasePool(poolID string) error {
+	return types.NotImplementedErrorf("not implemented yet")
+}
 
 // AddSubnet adds a subnet for the specified address space
 func (a *Allocator) AddSubnet(addrSpace AddressSpace, subnetInfo *SubnetInfo) error {
@@ -386,6 +403,16 @@ func (a *Allocator) AddVendorInfo([]byte) error {
 /****************
  * IPAM Contract
  ****************/
+
+// RequestAddress returns an address from the specified pool ID
+func (a *Allocator) RequestAddress(string, net.IP, map[string]string) (*net.IPNet, map[string]string, error) {
+	return nil, nil, types.NotImplementedErrorf("not implemented yet")
+}
+
+// ReleaseAddress releases the address from the specified pool ID
+func (a *Allocator) ReleaseAddress(string, net.IP) error {
+	return types.NotImplementedErrorf("not implemented yet")
+}
 
 // Request allows requesting an IPv4 address from the specified address space
 func (a *Allocator) Request(addrSpace AddressSpace, req *AddressRequest) (*AddressResponse, error) {
