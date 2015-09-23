@@ -37,6 +37,7 @@ var (
 	ErrIpamInternalError        = errors.New("IPAM Internal Error")
 	ErrInvalidAddressSpace      = errors.New("Invalid Address Space")
 	ErrInvalidPool              = errors.New("Invalid Address Pool")
+	ErrInvalidSubPool           = errors.New("Invalid Address SubPool")
 	ErrInvalidRequest           = errors.New("Invalid Request")
 	ErrPoolNotFound             = errors.New("Address Pool not found")
 	ErrOverlapPool              = errors.New("Address pool overlaps with existing pool on this address space")
@@ -44,7 +45,7 @@ var (
 	ErrNoAvailableIPs           = errors.New("No available addresses on this pool")
 	ErrIPAlreadyAllocated       = errors.New("Address already in use")
 	ErrIPOutOfRange             = errors.New("Requested address is out of range")
-	ErrPoolAlreadyRegistered    = errors.New("Pool already registered on this address space")
+	ErrPoolOverlap              = errors.New("Pool overlaps with other one on this address space")
 	ErrBadPool                  = errors.New("Address space does not contain specified address pool")
 )
 

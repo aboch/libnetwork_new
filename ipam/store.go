@@ -2,7 +2,7 @@ package ipam
 
 import (
 	"encoding/json"
-	"net"
+	"fmt"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
@@ -13,14 +13,14 @@ import (
 func (a *Allocator) Key() []string {
 	a.Lock()
 	defer a.Unlock()
-	return []string{a.App, a.ID}
+	return []string{dsConfigKey}
 }
 
 // KeyPrefix returns the immediate parent key that can be used for tree walk
 func (a *Allocator) KeyPrefix() []string {
 	a.Lock()
 	defer a.Unlock()
-	return []string{a.App}
+	return []string{dsConfigKey}
 }
 
 // Value marshals the data to be stored in the KV store
@@ -45,21 +45,25 @@ func (a *Allocator) SetValue(value []byte) error {
 	return nil
 }
 
-func subnetsToByteArray(m map[subnetKey]*SubnetInfo) ([]byte, error) {
+func subnetsToByteArray(m map[subnetKey]*PoolData) ([]byte, error) {
 	if m == nil {
 		return nil, nil
 	}
 
 	mm := make(map[string]string, len(m))
 	for k, v := range m {
-		mm[k.String()] = v.Subnet.String()
+		ba, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal pool Data for key %s: %v", k.String(), err)
+		}
+		mm[k.String()] = string(ba)
 	}
 
 	return json.Marshal(mm)
 }
 
-func byteArrayToSubnets(ba []byte) map[subnetKey]*SubnetInfo {
-	m := map[subnetKey]*SubnetInfo{}
+func byteArrayToSubnets(ba []byte) map[subnetKey]*PoolData {
+	m := map[subnetKey]*PoolData{}
 
 	if ba == nil || len(ba) == 0 {
 		return m
@@ -77,14 +81,13 @@ func byteArrayToSubnets(ba []byte) map[subnetKey]*SubnetInfo {
 			log.Warnf("Failed to decode subnets map entry: (%s, %s)", ks, vs)
 			continue
 		}
-		si := &SubnetInfo{}
-		_, nw, err := net.ParseCIDR(vs)
+		var p PoolData
+		err := json.Unmarshal([]byte(vs), &p)
 		if err != nil {
-			log.Warnf("Failed to decode subnets map entry value: (%s, %s)", ks, vs)
-			continue
+			log.Warnf("Failed to decode pool Data for key %s: %v", sk, err)
+			return m
 		}
-		si.Subnet = nw
-		m[sk] = si
+		m[sk] = &p
 	}
 	return m
 }

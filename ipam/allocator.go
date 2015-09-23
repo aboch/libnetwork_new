@@ -6,10 +6,11 @@ import (
 	"strings"
 	"sync"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/docker/libkv/store"
 	"github.com/docker/libnetwork/bitseq"
 	"github.com/docker/libnetwork/datastore"
+	"github.com/docker/libnetwork/ipamapi"
+	"github.com/docker/libnetwork/netutils"
 	"github.com/docker/libnetwork/types"
 )
 
@@ -17,29 +18,55 @@ const (
 	localAddressSpace  = "LocalDefault"
 	globalAddressSpace = "GlobalDefault"
 	// The biggest configurable host subnets
-	minNetSize   = 8
-	minNetSizeV6 = 64
-	// The effective network size for v6
+	minNetSize      = 8
+	minNetSizeV6    = 64
 	minNetSizeV6Eff = 96
-	// The size of the host subnet used internally, it's the most granular sequence addresses
-	defaultInternalHostSize = 16
 	// datastore keyes for ipam objects
-	dsConfigKey = "ipam-config" // ipam-config/<domain>/<map of subent configs>
-	dsDataKey   = "ipam-data"   // ipam-data/<domain>/<subnet>/<child-sudbnet>/<bitmask>
+	dsConfigKey = "ipam/" + ipamapi.DefaultIPAM + "/config"
+	dsDataKey   = "ipam/" + ipamapi.DefaultIPAM + "/data"
 )
+
+var (
+	localPredefinedPools  []*net.IPNet
+	globalPredefinedPools []*net.IPNet
+)
+
+func init() {
+	localPredefinedPools = initLocalPredefinedPools()
+	globalPredefinedPools = initGlobalPredefinedPools()
+}
+
+type addressRange struct {
+	start, end uint32
+}
+
+func (r *addressRange) String() string {
+	return fmt.Sprintf("[%d, %d]", r.start, r.end)
+}
+
+// PoolData contains the configured pool data
+type PoolData struct {
+	ParentKey subnetKey
+	Pool      *net.IPNet
+	Range     *addressRange
+	RefCount  uint32
+}
+
+func (p *PoolData) String() string {
+	return fmt.Sprintf("ParentKey: %s, Pool: %s, Range: %s, RefCount: %d",
+		p.ParentKey.String(), p.Pool.String(), p.Range, p.RefCount)
+}
 
 // Allocator provides per address space ipv4/ipv6 book keeping
 type Allocator struct {
-	// The internal subnets host size
-	internalHostSize int
+	// Predefined pools for default address spaces
+	predefined map[string][]*net.IPNet
 	// Static subnet information
-	subnets map[subnetKey]*SubnetInfo
-	// Allocated addresses in each address space's internal subnet
+	subnets map[subnetKey]*PoolData
+	// Allocated addresses in each address space's subnet
 	addresses map[subnetKey]*bitseq.Handle
 	// Datastore
 	store    datastore.DataStore
-	App      string
-	ID       string
 	dbIndex  uint64
 	dbExists bool
 	sync.Mutex
@@ -48,12 +75,12 @@ type Allocator struct {
 // NewAllocator returns an instance of libnetwork ipam
 func NewAllocator(ds datastore.DataStore) (*Allocator, error) {
 	a := &Allocator{}
-	a.subnets = make(map[subnetKey]*SubnetInfo)
+	a.subnets = make(map[subnetKey]*PoolData)
 	a.addresses = make(map[subnetKey]*bitseq.Handle)
-	a.internalHostSize = defaultInternalHostSize
+	a.predefined = make(map[string][]*net.IPNet, 2)
+	a.predefined[localAddressSpace] = localPredefinedPools
+	a.predefined[globalAddressSpace] = globalPredefinedPools
 	a.store = ds
-	a.App = "ipam"
-	a.ID = dsConfigKey
 
 	if a.store == nil {
 		return a, nil
@@ -72,18 +99,13 @@ func NewAllocator(ds datastore.DataStore) (*Allocator, error) {
 	}
 	a.subnetConfigFromStore(kvPair)
 
-	// Now retrieve the list of small subnets
+	// Now retrieve the bitmasks for the parent pools
 	var inserterList []func() error
 	a.Lock()
 	for k, v := range a.subnets {
-		inserterList = append(inserterList,
-			func() error {
-				subnetList, err := getInternalSubnets(v.Subnet, a.internalHostSize)
-				if err != nil {
-					return fmt.Errorf("failed to load address bitmask for configured subnet %s because of %s", v.Subnet.String(), err.Error())
-				}
-				return a.insertAddressMasks(k, subnetList)
-			})
+		if v.Range == nil {
+			inserterList = append(inserterList, func() error { return a.insertBitMask(k, v.Pool) })
+		}
 	}
 	a.Unlock()
 
@@ -109,7 +131,7 @@ func (a *Allocator) subnetConfigFromStore(kvPair *store.KVPair) {
 
 // Pointer to the configured subnets in each address space
 type subnetKey struct {
-	addressSpace AddressSpace
+	addressSpace string
 	subnet       string
 	childSubnet  string
 }
@@ -131,10 +153,10 @@ func (s *subnetKey) FromString(str string) error {
 	if len(p) != 3 && len(p) != 5 {
 		return fmt.Errorf("invalid string form for subnetkey: %s", str)
 	}
-	s.addressSpace = AddressSpace(p[0])
+	s.addressSpace = p[0]
 	s.subnet = fmt.Sprintf("%s/%s", p[1], p[2])
 	if len(p) == 5 {
-		s.childSubnet = fmt.Sprintf("%s/%s", p[1], p[2])
+		s.childSubnet = fmt.Sprintf("%s/%s", p[3], p[4])
 	}
 
 	return nil
@@ -161,9 +183,9 @@ const (
 	v6 = 6
 )
 
-/*******************
- * IPAMConf Contract
- ********************/
+/******************
+ * Config Contract
+ ******************/
 
 // GetDefaultAddressSpaces returns the local and global default address spaces
 func (a *Allocator) GetDefaultAddressSpaces() (string, string, error) {
@@ -172,92 +194,264 @@ func (a *Allocator) GetDefaultAddressSpaces() (string, string, error) {
 
 // RequestPool returns an address pool along with its unique id.
 func (a *Allocator) RequestPool(addressSpace, pool, subPool string, options map[string]string, v6 bool) (string, *net.IPNet, map[string]string, error) {
-	return "", nil, nil, types.NotImplementedErrorf("not implemented yet")
-}
+	var (
+		nw, pw   *net.IPNet
+		ipr      *addressRange
+		c, p, pp *PoolData
+		ok       bool
+		err      error
+	)
 
-// ReleasePool releases the address pool identified by the passed id
-func (a *Allocator) ReleasePool(poolID string) error {
-	return types.NotImplementedErrorf("not implemented yet")
-}
+	if addressSpace == "" {
+		return "", nil, nil, ipamapi.ErrInvalidAddressSpace
+	}
 
-// AddSubnet adds a subnet for the specified address space
-func (a *Allocator) AddSubnet(addrSpace AddressSpace, subnetInfo *SubnetInfo) error {
-	// Sanity check
-	if addrSpace == "" {
-		return ErrInvalidAddressSpace
+	if pool == "" && subPool != "" {
+		return "", nil, nil, ipamapi.ErrInvalidSubPool
 	}
-	if subnetInfo == nil || subnetInfo.Subnet == nil {
-		return ErrInvalidSubnet
+
+	if pool != "" {
+		_, nw, err = net.ParseCIDR(pool)
+		if err != nil {
+			return "", nil, nil, ipamapi.ErrInvalidPool
+		}
+		if pw, err = adjustAndCheckSubnetSize(nw); err != nil {
+			return "", nil, nil, err
+		}
+		// Reset pool to canonical form
+		pool = types.GetIPNetCanonical(nw).String()
+		if subPool != "" {
+			ipr, err = getAddressRange(subPool)
+			if err != nil {
+				return "", nil, nil, err
+			}
+		}
+	} else {
+		pool, nw, err = a.getPredefinedPool(addressSpace, v6)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		if pw, err = adjustAndCheckSubnetSize(nw); err != nil {
+			return "", nil, nil, err
+		}
 	}
-	// Convert to smaller internal subnets (if needed)
-	subnetList, err := getInternalSubnets(subnetInfo.Subnet, a.internalHostSize)
-	if err != nil {
-		return err
-	}
+
+	k := subnetKey{addressSpace: addressSpace, subnet: pool, childSubnet: subPool}
+
 retry:
-	if a.contains(addrSpace, subnetInfo) {
-		return ErrOverlapSubnet
+	if ipr == nil {
+		a.Lock()
+		if p, ok = a.subnets[k]; ok {
+			p.RefCount++
+			goto finalize
+		}
+		a.Unlock()
+		if a.contains(addressSpace, nw) {
+			return "", nil, nil, ipamapi.ErrPoolOverlap
+		}
 	}
 
-	// Store the configured subnet and sync to datatstore
-	key := subnetKey{addrSpace, subnetInfo.Subnet.String(), ""}
 	a.Lock()
-	a.subnets[key] = subnetInfo
+	if p, ok = a.subnets[k]; ok {
+		c = p
+		for ok {
+			c.RefCount++
+			c, ok = a.subnets[c.ParentKey]
+		}
+		goto finalize
+	}
+
+	p = &PoolData{
+		Pool:     pw,
+		Range:    ipr,
+		RefCount: 1,
+	}
+
+	if p.Range == nil {
+		a.Unlock()
+		if err := a.insertBitMask(k, p.Pool); err != nil {
+			return "", nil, nil, err
+		}
+		a.Lock()
+		a.subnets[k] = p
+		goto finalize
+	}
+
+	p.ParentKey = subnetKey{addressSpace: addressSpace, subnet: pool}
+	a.subnets[k] = p
+	if pp, ok = a.subnets[p.ParentKey]; ok {
+		c = pp
+		for ok {
+			c.RefCount++
+			c, ok = a.subnets[c.ParentKey]
+		}
+		goto finalize
+	}
+
+	a.Unlock()
+
+	// parent does not exist
+	pp = &PoolData{
+		Pool:     p.Pool,
+		RefCount: 1,
+	}
+	if err := a.insertBitMask(p.ParentKey, pp.Pool); err != nil {
+		return "", nil, nil, err
+	}
+
+	a.Lock()
+	a.subnets[p.ParentKey] = pp
+finalize:
 	a.Unlock()
 	err = a.writeToStore()
 	if err != nil {
 		if _, ok := err.(types.RetryError); !ok {
-			return types.InternalErrorf("subnet configuration failed because of %s", err.Error())
+			return "", nil, nil, types.InternalErrorf("pool configuration failed because of %s", err.Error())
 		}
 		// Update to latest
 		if erru := a.readFromStore(); erru != nil {
-			// Restore and bail out
-			a.Lock()
-			delete(a.addresses, key)
-			a.Unlock()
-			return fmt.Errorf("failed to get updated subnets config from datastore (%v) after (%v)", erru, err)
+			return "", nil, nil, fmt.Errorf("failed to get updated pool config from datastore (%v) after (%v)", erru, err)
 		}
 		goto retry
 	}
 
-	// Insert respective bitmasks for this subnet
-	a.insertAddressMasks(key, subnetList)
+	return k.String(), p.Pool, nil, nil
+}
+
+func (a *Allocator) insertBitMask(key subnetKey, pool *net.IPNet) error {
+	ipVer := getAddressVersion(pool.IP)
+	ones, bits := pool.Mask.Size()
+	numAddresses := uint32(1 << uint(bits-ones))
+
+	if ipVer == v4 {
+		// Do not let broadcast address be reserved
+		numAddresses--
+	}
+
+	// Generate the new address masks. AddressMask content may come from datastore
+	h, err := bitseq.NewHandle(dsDataKey, a.store, key.String(), numAddresses)
+	if err != nil {
+		return err
+	}
+
+	if ipVer == v4 {
+		// Do not let network identifier address be reserved
+		h.Set(0)
+	}
+
+	a.Lock()
+	a.addresses[key] = h
+	a.Unlock()
 
 	return nil
 }
 
-// Create and insert the internal subnet(s) addresses masks into the address database. Mask data may come from the bitseq datastore.
-func (a *Allocator) insertAddressMasks(parentKey subnetKey, internalSubnetList []*net.IPNet) error {
-	ipVer := getAddressVersion(internalSubnetList[0].IP)
-	num := len(internalSubnetList)
-	ones, bits := internalSubnetList[0].Mask.Size()
-	numAddresses := 1 << uint(bits-ones)
-
-	for i := 0; i < num; i++ {
-		smallKey := subnetKey{parentKey.addressSpace, parentKey.subnet, internalSubnetList[i].String()}
-		limit := uint32(numAddresses)
-
-		if ipVer == v4 && i == num-1 {
-			// Do not let broadcast address be reserved
-			limit--
-		}
-
-		// Generate the new address masks. AddressMask content may come from datastore
-		h, err := bitseq.NewHandle(dsDataKey, a.getStore(), smallKey.String(), limit)
-		if err != nil {
-			return err
-		}
-
-		if ipVer == v4 && i == 0 {
-			// Do not let network identifier address be reserved
-			h.Set(0)
-		}
-
-		a.Lock()
-		a.addresses[smallKey] = h
-		a.Unlock()
+// ReleasePool releases the address pool identified by the passed id
+func (a *Allocator) ReleasePool(poolID string) error {
+	var (
+		p, pp *PoolData
+		rk    *subnetKey
+		ok    bool
+	)
+	k := subnetKey{}
+	if err := k.FromString(poolID); err != nil {
+		return types.BadRequestErrorf("invalid pool id: %s", poolID)
 	}
+
+retry:
+	a.Lock()
+	p, ok = a.subnets[k]
+	if !ok {
+		a.Unlock()
+		return ipamapi.ErrBadPool
+	}
+	p.RefCount--
+	if p.RefCount == 0 {
+		delete(a.subnets, k)
+		rk = &k
+	}
+
+	if p.Range != nil {
+		pp, ok = a.subnets[p.ParentKey]
+		if !ok {
+			a.Unlock()
+			return types.InternalErrorf("cannot find parent pool for %s", poolID)
+		}
+		pp.RefCount--
+		if pp.RefCount == 0 {
+			delete(a.subnets, p.ParentKey)
+			rk = &p.ParentKey
+		}
+		a.Unlock()
+		return nil
+	}
+	a.Unlock()
+	if err := a.writeToStore(); err != nil {
+		if _, ok := err.(types.RetryError); !ok {
+			return types.InternalErrorf("pool (%s) removal failed because of %v", poolID, err)
+		}
+		// Update to latest
+		if erru := a.readFromStore(); erru != nil {
+			return fmt.Errorf("failed to get updated pool config from datastore (%v) after (%v)", erru, err)
+		}
+		goto retry
+	}
+
+	if rk == nil {
+		return nil
+	}
+
+	a.Lock()
+	if bm, ok := a.addresses[*rk]; ok {
+		bm.Destroy()
+	}
+	delete(a.addresses, *rk)
+	a.Unlock()
+
 	return nil
+}
+
+func (a *Allocator) getPredefineds(as string) []*net.IPNet {
+	a.Lock()
+	defer a.Unlock()
+	l := make([]*net.IPNet, 0, len(a.predefined[as]))
+	for _, pool := range a.predefined[as] {
+		l = append(l, pool)
+	}
+	return l
+}
+
+func (a *Allocator) getPredefinedPool(as string, ipV6 bool) (string, *net.IPNet, error) {
+	var v ipVersion
+	v = v4
+	if ipV6 {
+		v = v6
+	}
+
+	if as != localAddressSpace && as != globalAddressSpace {
+		return "", nil, fmt.Errorf("no default pool availbale for non-default addresss spaces")
+	}
+
+	for _, nw := range a.getPredefineds(as) {
+		if v != getAddressVersion(nw.IP) {
+			continue
+		}
+		cw := types.GetIPNetCanonical(nw)
+		if _, ok := a.subnets[subnetKey{addressSpace: as, subnet: cw.String()}]; ok {
+			continue
+		}
+		if !a.contains(as, cw) {
+			if as == localAddressSpace {
+				if err := netutils.CheckRouteOverlaps(nw); err == nil {
+					return cw.String(), nw, nil
+				}
+				continue
+			}
+			return cw.String(), nw, nil
+		}
+	}
+
+	return "", nil, types.NotFoundErrorf("could not find an available predefined network")
 }
 
 // Check subnets size. In case configured subnet is v6 and host size is
@@ -266,7 +460,7 @@ func adjustAndCheckSubnetSize(subnet *net.IPNet) (*net.IPNet, error) {
 	ones, bits := subnet.Mask.Size()
 	if v6 == getAddressVersion(subnet.IP) {
 		if ones < minNetSizeV6 {
-			return nil, ErrInvalidSubnet
+			return nil, ipamapi.ErrInvalidPool
 		}
 		if ones < minNetSizeV6Eff {
 			newMask := net.CIDRMask(minNetSizeV6Eff, bits)
@@ -274,20 +468,19 @@ func adjustAndCheckSubnetSize(subnet *net.IPNet) (*net.IPNet, error) {
 		}
 	} else {
 		if ones < minNetSize {
-			return nil, ErrInvalidSubnet
+			return nil, ipamapi.ErrInvalidPool
 		}
 	}
 	return subnet, nil
 }
 
 // Checks whether the passed subnet is a superset or subset of any of the subset in the db
-func (a *Allocator) contains(space AddressSpace, subInfo *SubnetInfo) bool {
+func (a *Allocator) contains(space string, nw *net.IPNet) bool {
 	a.Lock()
 	defer a.Unlock()
 	for k, v := range a.subnets {
-		if space == k.addressSpace {
-			if subInfo.Subnet.Contains(v.Subnet.IP) ||
-				v.Subnet.Contains(subInfo.Subnet.IP) {
+		if space == k.addressSpace && k.childSubnet == "" {
+			if nw.Contains(v.Pool.IP) || v.Pool.Contains(nw.IP) {
 				return true
 			}
 		}
@@ -295,280 +488,92 @@ func (a *Allocator) contains(space AddressSpace, subInfo *SubnetInfo) bool {
 	return false
 }
 
-// Splits the passed subnet into N internal subnets with host size equal to internalHostSize.
-// If the subnet's host size is equal to or smaller than internalHostSize, there won't be any
-// split and the return list will contain only the passed subnet.
-func getInternalSubnets(inSubnet *net.IPNet, internalHostSize int) ([]*net.IPNet, error) {
-	var subnetList []*net.IPNet
-
-	// Sanity check and size adjustment for v6
-	subnet, err := adjustAndCheckSubnetSize(inSubnet)
-	if err != nil {
-		return subnetList, err
-	}
-
-	// Get network/host subnet information
-	netBits, bits := subnet.Mask.Size()
-	hostBits := bits - netBits
-
-	extraBits := hostBits - internalHostSize
-	if extraBits <= 0 {
-		subnetList = make([]*net.IPNet, 1)
-		subnetList[0] = subnet
-	} else {
-		// Split in smaller internal subnets
-		numIntSubs := 1 << uint(extraBits)
-		subnetList = make([]*net.IPNet, numIntSubs)
-
-		// Construct one copy of the internal subnets's mask
-		intNetBits := bits - internalHostSize
-		intMask := net.CIDRMask(intNetBits, bits)
-
-		// Construct the prefix portion for each internal subnet
-		for i := 0; i < numIntSubs; i++ {
-			intIP := make([]byte, len(subnet.IP))
-			copy(intIP, subnet.IP) // IPv6 is too big, just work on the extra portion
-			addIntToIP(intIP, uint32(i<<uint(internalHostSize)))
-			subnetList[i] = &net.IPNet{IP: intIP, Mask: intMask}
-		}
-	}
-	return subnetList, nil
-}
-
-// RemoveSubnet removes the subnet from the specified address space
-func (a *Allocator) RemoveSubnet(addrSpace AddressSpace, subnet *net.IPNet) error {
-	if addrSpace == "" {
-		return ErrInvalidAddressSpace
-	}
-	if subnet == nil {
-		return ErrInvalidSubnet
-	}
-retry:
-	// Look for the respective subnet configuration data
-	// Remove it along with the internal subnets
-	subKey := subnetKey{addrSpace, subnet.String(), ""}
-	a.Lock()
-	current, ok := a.subnets[subKey]
-	a.Unlock()
-	if !ok {
-		return ErrSubnetNotFound
-	}
-
-	// Remove config and sync to datastore
-	a.Lock()
-	delete(a.subnets, subKey)
-	a.Unlock()
-	err := a.writeToStore()
-	if err != nil {
-		if _, ok := err.(types.RetryError); !ok {
-			return types.InternalErrorf("subnet removal failed because of %s", err.Error())
-		}
-		// Update to latest
-		if erru := a.readFromStore(); erru != nil {
-			// Restore and bail out
-			a.Lock()
-			a.subnets[subKey] = current
-			a.Unlock()
-			return fmt.Errorf("failed to get updated subnets config from datastore (%v) after (%v)", erru, err)
-		}
-		goto retry
-	}
-
-	// Get the list of smaller internal subnets
-	subnetList, err := getInternalSubnets(subnet, a.internalHostSize)
-	if err != nil {
-		return err
-	}
-
-	for _, s := range subnetList {
-		sk := subnetKey{addrSpace, subKey.subnet, s.String()}
-		a.Lock()
-		if bm, ok := a.addresses[sk]; ok {
-			bm.Destroy()
-		}
-		delete(a.addresses, sk)
-		a.Unlock()
-	}
-
-	return nil
-
-}
-
-// AddVendorInfo adds vendor specific data
-func (a *Allocator) AddVendorInfo([]byte) error {
-	// no op for us
-	return nil
-}
-
-/****************
- * IPAM Contract
- ****************/
+/*********************
+ * Allocator Contract
+ *********************/
 
 // RequestAddress returns an address from the specified pool ID
-func (a *Allocator) RequestAddress(string, net.IP, map[string]string) (*net.IPNet, map[string]string, error) {
-	return nil, nil, types.NotImplementedErrorf("not implemented yet")
+func (a *Allocator) RequestAddress(poolID string, prefAddress net.IP, opts map[string]string) (*net.IPNet, map[string]string, error) {
+	k := subnetKey{}
+	if err := k.FromString(poolID); err != nil {
+		return nil, nil, types.BadRequestErrorf("invalid pool id: %s", poolID)
+	}
+
+	a.Lock()
+	defer a.Unlock()
+	p, ok := a.subnets[k]
+	if !ok {
+		return nil, nil, types.NotFoundErrorf("cannot find address pool for poolID:%s", poolID)
+	}
+
+	if prefAddress != nil && !p.Pool.Contains(prefAddress) {
+		return nil, nil, ipamapi.ErrIPOutOfRange
+	}
+
+	c := p
+	for c.Range != nil {
+		k = c.ParentKey
+		c, ok = a.subnets[k]
+	}
+
+	ip, err := a.getAddress(c.Pool, a.addresses[k], prefAddress, p.Range)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &net.IPNet{IP: ip, Mask: p.Pool.Mask}, nil, nil
 }
 
 // ReleaseAddress releases the address from the specified pool ID
-func (a *Allocator) ReleaseAddress(string, net.IP) error {
-	return types.NotImplementedErrorf("not implemented yet")
-}
-
-// Request allows requesting an IPv4 address from the specified address space
-func (a *Allocator) Request(addrSpace AddressSpace, req *AddressRequest) (*AddressResponse, error) {
-	return a.request(addrSpace, req, v4)
-}
-
-// RequestV6 requesting an IPv6 address from the specified address space
-func (a *Allocator) RequestV6(addrSpace AddressSpace, req *AddressRequest) (*AddressResponse, error) {
-	return a.request(addrSpace, req, v6)
-}
-
-func (a *Allocator) request(addrSpace AddressSpace, req *AddressRequest, version ipVersion) (*AddressResponse, error) {
-	// Empty response
-	response := &AddressResponse{}
-
-	// Sanity check
-	if addrSpace == "" {
-		return response, ErrInvalidAddressSpace
+func (a *Allocator) ReleaseAddress(poolID string, address net.IP) error {
+	k := subnetKey{}
+	if err := k.FromString(poolID); err != nil {
+		return types.BadRequestErrorf("invalid pool id: %s", poolID)
 	}
 
-	// Validate request
-	if err := req.Validate(); err != nil {
-		return response, err
-	}
-
-	// Check ip version congruence
-	if &req.Subnet != nil && version != getAddressVersion(req.Subnet.IP) {
-		return response, ErrInvalidRequest
-	}
-
-	// Look for an address
-	ip, _, err := a.reserveAddress(addrSpace, &req.Subnet, req.Address, version)
-	if err == nil {
-		// Populate response
-		response.Address = ip
-		a.Lock()
-		response.Subnet = *a.subnets[subnetKey{addrSpace, req.Subnet.String(), ""}]
-		a.Unlock()
-	}
-
-	return response, err
-}
-
-// Release allows releasing the address from the specified address space
-func (a *Allocator) Release(addrSpace AddressSpace, address net.IP) {
-	var (
-		space *bitseq.Handle
-		sub   *net.IPNet
-	)
-
-	if address == nil {
-		log.Debugf("Requested to remove nil address from address space %s", addrSpace)
-		return
-	}
-
-	ver := getAddressVersion(address)
-	if ver == v4 {
-		address = address.To4()
-	}
-
-	// Find the subnet containing the address
-	for _, subKey := range a.getSubnetList(addrSpace, ver) {
-		sub = subKey.canonicalChildSubnet()
-		if sub.Contains(address) {
-			a.Lock()
-			space = a.addresses[subKey]
-			a.Unlock()
-			break
-		}
-	}
-	if space == nil {
-		log.Debugf("Could not find subnet on address space %s containing %s on release", addrSpace, address.String())
-		return
-	}
-
-	// Retrieve correspondent ordinal in the subnet
-	hostPart, err := types.GetHostPartIP(address, sub.Mask)
-	if err != nil {
-		log.Warnf("Failed to release address %s on address space %s because of internal error: %v", address.String(), addrSpace, err)
-		return
-	}
-	ordinal := ipToUint32(hostPart)
-
-	// Release it
-	if err := space.Unset(ordinal); err != nil {
-		log.Warnf("Failed to release address %s on address space %s because of internal error: %v", address.String(), addrSpace, err)
-	}
-}
-
-func (a *Allocator) reserveAddress(addrSpace AddressSpace, subnet *net.IPNet, prefAddress net.IP, ver ipVersion) (net.IP, *net.IPNet, error) {
-	var keyList []subnetKey
-
-	// Get the list of pointers to the internal subnets
-	if subnet != nil {
-		// Get the list of smaller internal subnets
-		subnetList, err := getInternalSubnets(subnet, a.internalHostSize)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, s := range subnetList {
-			keyList = append(keyList, subnetKey{addrSpace, subnet.String(), s.String()})
-		}
-	} else {
-		a.Lock()
-		keyList = a.getSubnetList(addrSpace, ver)
-		a.Unlock()
-	}
-	if len(keyList) == 0 {
-		return nil, nil, ErrNoAvailableSubnet
-	}
-
-	for _, key := range keyList {
-		a.Lock()
-		bitmask, ok := a.addresses[key]
-		a.Unlock()
-		if !ok {
-			log.Warnf("Did not find a bitmask for subnet key: %s", key.String())
-			continue
-		}
-		address, err := a.getAddress(key.canonicalChildSubnet(), bitmask, prefAddress, ver)
-		if err == nil {
-			return address, subnet, nil
-		}
-	}
-
-	return nil, nil, ErrNoAvailableIPs
-}
-
-// Get the list of available internal subnets for the specified address space and the desired ip version
-func (a *Allocator) getSubnetList(addrSpace AddressSpace, ver ipVersion) []subnetKey {
-	var list [1024]subnetKey
-	ind := 0
 	a.Lock()
-	for subKey := range a.addresses {
-		s := subKey.canonicalSubnet()
-		subVer := getAddressVersion(s.IP)
-		if subKey.addressSpace == addrSpace && subVer == ver {
-			list[ind] = subKey
-			ind++
-		}
+	defer a.Unlock()
+	p, ok := a.subnets[k]
+	if !ok {
+		return ipamapi.ErrBadPool
 	}
-	a.Unlock()
-	return list[0:ind]
+
+	if address == nil || !p.Pool.Contains(address) {
+		return ipamapi.ErrInvalidRequest
+	}
+
+	c := p
+	for c.Range != nil {
+		k = c.ParentKey
+		c = a.subnets[k]
+	}
+
+	bm, ok := a.addresses[k]
+	if !ok {
+		return fmt.Errorf("failed to locate bitmask")
+	}
+
+	h, err := types.GetHostPartIP(address, c.Pool.Mask)
+	if err != nil {
+		return fmt.Errorf("failed to release address %s: %v", address.String(), err)
+	}
+
+	return bm.Unset(ipToUint32(h))
 }
 
-func (a *Allocator) getAddress(subnet *net.IPNet, bitmask *bitseq.Handle, prefAddress net.IP, ver ipVersion) (net.IP, error) {
+func (a *Allocator) getAddress(subnet *net.IPNet, bitmask *bitseq.Handle, prefAddress net.IP, ipr *addressRange) (net.IP, error) {
 	var (
 		ordinal uint32
 		err     error
 	)
 
 	if bitmask.Unselected() <= 0 {
-		return nil, ErrNoAvailableIPs
+		return nil, ipamapi.ErrNoAvailableIPs
 	}
-	if prefAddress == nil {
+	if ipr == nil && prefAddress == nil {
 		ordinal, err = bitmask.SetAny()
+	} else if ipr != nil {
+		ordinal, err = bitmask.SetAnyInRange(ipr.start, ipr.end)
 	} else {
 		hostPart, e := types.GetHostPartIP(prefAddress, subnet.Mask)
 		if e != nil {
@@ -578,7 +583,7 @@ func (a *Allocator) getAddress(subnet *net.IPNet, bitmask *bitseq.Handle, prefAd
 		err = bitmask.Set(ordinal)
 	}
 	if err != nil {
-		return nil, ErrNoAvailableIPs
+		return nil, ipamapi.ErrNoAvailableIPs
 	}
 
 	// Convert IP ordinal for this subnet into IP address
@@ -589,21 +594,16 @@ func (a *Allocator) getAddress(subnet *net.IPNet, bitmask *bitseq.Handle, prefAd
 func (a *Allocator) DumpDatabase() {
 	a.Lock()
 	defer a.Unlock()
-	for k, config := range a.subnets {
-		fmt.Printf("\n\n%s:", config.Subnet.String())
-		subnetList, _ := getInternalSubnets(config.Subnet, a.internalHostSize)
-		for _, s := range subnetList {
-			internKey := subnetKey{k.addressSpace, config.Subnet.String(), s.String()}
-			bm := a.addresses[internKey]
-			fmt.Printf("\n\t%s: %s\n\t%d", internKey.childSubnet, bm, bm.Unselected())
-		}
-	}
-}
 
-func (a *Allocator) getStore() datastore.DataStore {
-	a.Lock()
-	defer a.Unlock()
-	return a.store
+	fmt.Printf("\n\nPoolData")
+	for k, config := range a.subnets {
+		fmt.Printf("\n%v: %v", k, config)
+	}
+
+	fmt.Printf("\n\nBitmasks")
+	for k, bm := range a.addresses {
+		fmt.Printf("\n\t%s: %s\n\t%d", k, bm, bm.Unselected())
+	}
 }
 
 // It generates the ip address in the passed subnet specified by
@@ -648,4 +648,53 @@ func ipToUint32(ip []byte) uint32 {
 		value += uint32(ip[i]) << uint(j*8)
 	}
 	return value
+}
+
+func initLocalPredefinedPools() []*net.IPNet {
+	pl := make([]*net.IPNet, 0, 274)
+	mask := []byte{255, 255, 0, 0}
+	for i := 17; i < 32; i++ {
+		pl = append(pl, &net.IPNet{IP: []byte{172, byte(i), 42, 1}, Mask: mask})
+	}
+	// 10.[0-255].42.1/16
+	for i := 0; i < 256; i++ {
+		pl = append(pl, &net.IPNet{IP: []byte{10, byte(i), 42, 1}, Mask: mask})
+	}
+	// 192.168.[42-44].1/24
+	mask24 := []byte{255, 255, 255, 0}
+	for i := 42; i < 45; i++ {
+		pl = append(pl, &net.IPNet{IP: []byte{192, 168, byte(i), 1}, Mask: mask24})
+	}
+	return pl
+}
+
+func initGlobalPredefinedPools() []*net.IPNet {
+	pl := make([]*net.IPNet, 0, 256*256)
+	mask := []byte{255, 255, 255, 0}
+	for i := 0; i < 256; i++ {
+		for j := 0; j < 256; j++ {
+			pl = append(pl, &net.IPNet{IP: []byte{10, byte(i), byte(j), 0}, Mask: mask})
+		}
+	}
+	return pl
+}
+
+func getAddressRange(pool string) (*addressRange, error) {
+	_, nw, err := net.ParseCIDR(pool)
+	if err != nil {
+		return nil, ipamapi.ErrInvalidSubPool
+	}
+	lIP, e := types.GetHostPartIP(nw.IP, nw.Mask)
+	if e != nil {
+		return nil, fmt.Errorf("failed to compute range's lowest ip address: %v", e)
+	}
+	bIP, e := types.GetBroadcastIP(nw.IP, nw.Mask)
+	if e != nil {
+		return nil, fmt.Errorf("failed to compute range's broadcast ip address: %v", e)
+	}
+	hIP, e := types.GetHostPartIP(bIP, nw.Mask)
+	if e != nil {
+		return nil, fmt.Errorf("failed to compute range's highest ip address: %v", e)
+	}
+	return &addressRange{ipToUint32(types.GetMinimalIP(lIP)), ipToUint32(types.GetMinimalIP(hIP))}, nil
 }

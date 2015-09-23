@@ -329,17 +329,6 @@ func (c *controller) addNetwork(n *network) error {
 		}
 	}
 
-	c.Lock()
-	// Load the ipam driver if not done already
-	_, ok = c.ipams[n.ipamType]
-	c.Unlock()
-
-	if !ok {
-		if _, err := c.loadIpam(n.ipamType); err != nil {
-			return err
-		}
-	}
-
 	n.Lock()
 	n.svcRecords = svcMap{}
 	n.driver = dd.driver
@@ -560,26 +549,30 @@ func (c *controller) loadIpam(name string) (*ipamData, error) {
 	return id, nil
 }
 
-func (c *controller) getIPConfig(name string) (ipamapi.Config, error) {
+func (c *controller) getIPAM(name string) (id *ipamData, err error) {
 	c.Lock()
 	defer c.Unlock()
-
-	ip, ok := c.ipams[name]
-	if !ok {
-		return nil, types.NotFoundErrorf("no ip config found with ipam name: %s", name)
+	var ok bool
+	if id, ok = c.ipams[name]; !ok {
+		id, err = c.loadIpam(name)
 	}
-	return ip.config, nil
+	return
+}
+
+func (c *controller) getIPConfig(name string) (ipamapi.Config, error) {
+	id, err := c.getIPAM(name)
+	if err != nil {
+		return nil, err
+	}
+	return id.config, nil
 }
 
 func (c *controller) getIPAllocator(name string) (ipamapi.Allocator, error) {
-	c.Lock()
-	defer c.Unlock()
-
-	ip, ok := c.ipams[name]
-	if !ok {
-		return nil, types.NotFoundErrorf("no ip allocator found with ipam name: %s", name)
+	id, err := c.getIPAM(name)
+	if err != nil {
+		return nil, err
 	}
-	return ip.allocator, nil
+	return id.allocator, nil
 }
 
 func (c *controller) Stop() {
