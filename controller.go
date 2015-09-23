@@ -375,17 +375,6 @@ func (c *controller) addNetwork(n *network) error {
 		}
 	}
 
-	c.Lock()
-	// Load the ipam driver if not done already
-	_, ok = c.ipamDrivers[n.ipamType]
-	c.Unlock()
-
-	if !ok {
-		if _, err := c.loadIpamDriver(n.ipamType); err != nil {
-			return err
-		}
-	}
-
 	n.Lock()
 	n.svcRecords = svcMap{}
 	n.driver = dd.driver
@@ -606,15 +595,23 @@ func (c *controller) loadIpamDriver(name string) (*ipamData, error) {
 	return id, nil
 }
 
-func (c *controller) getIpamDriver(name string) (ipamapi.Ipam, error) {
+func (c *controller) getIPAM(name string) (id *ipamData, err error) {
+	var ok bool
 	c.Lock()
-	defer c.Unlock()
-
-	ip, ok := c.ipamDrivers[name]
+	id, ok = c.ipamDrivers[name]
+	c.Unlock()
 	if !ok {
-		return nil, types.NotFoundErrorf("no ipam driver found with name: %s", name)
+		id, err = c.loadIpamDriver(name)
 	}
-	return ip.driver, nil
+	return id, err
+}
+
+func (c *controller) getIpamDriver(name string) (ipamapi.Ipam, error) {
+	id, err := c.getIPAM(name)
+	if err != nil {
+		return nil, err
+	}
+	return id.driver, nil
 }
 
 func (c *controller) Stop() {
