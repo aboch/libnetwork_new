@@ -10,6 +10,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/ipallocator"
+	"github.com/docker/libnetwork/ipamapi"
 	"github.com/docker/libnetwork/osl"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
@@ -35,7 +36,7 @@ type network struct {
 	sync.Mutex
 }
 
-func (d *driver) CreateNetwork(id string, option map[string]interface{}) error {
+func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipData []ipamapi.IPData) error {
 	if id == "" {
 		return fmt.Errorf("invalid network id")
 	}

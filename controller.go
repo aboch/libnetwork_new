@@ -292,6 +292,8 @@ func (c *controller) NewNetwork(networkType, name string, options ...NetworkOpti
 		name:        name,
 		networkType: networkType,
 		ipamType:    ipamapi.DefaultIPAM,
+		ipamConfig:  make([]IpamConf, 0),
+		ipamInfo:    make([]ipamInfo, 0),
 		id:          stringid.GenerateRandomID(),
 		ctrlr:       c,
 		endpoints:   endpointTable{},
@@ -336,8 +338,20 @@ func (c *controller) addNetwork(n *network) error {
 	d := n.driver
 	n.Unlock()
 
+	cnfs, err := n.ipamAllocate()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			for _, cn := range cnfs {
+				cn()
+			}
+		}
+	}()
+
 	// Create the network
-	if err := d.CreateNetwork(n.id, n.generic); err != nil {
+	if err := d.CreateNetwork(n.id, n.generic, n.getIPData()); err != nil {
 		return err
 	}
 	if n.isGlobalScoped() {

@@ -9,6 +9,7 @@ import (
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/drivers/remote/api"
+	"github.com/docker/libnetwork/ipamapi"
 	"github.com/docker/libnetwork/types"
 )
 
@@ -82,10 +83,11 @@ func (d *driver) call(methodName string, arg interface{}, retVal maybeError) err
 	return nil
 }
 
-func (d *driver) CreateNetwork(id string, options map[string]interface{}) error {
+func (d *driver) CreateNetwork(id string, options map[string]interface{}, ipData []ipamapi.IPData) error {
 	create := &api.CreateNetworkRequest{
 		NetworkID: id,
 		Options:   options,
+		IPData:    ipData,
 	}
 	return d.call("CreateNetwork", create, &api.CreateNetworkResponse{})
 }
@@ -95,23 +97,22 @@ func (d *driver) DeleteNetwork(nid string) error {
 	return d.call("DeleteNetwork", delete, &api.DeleteNetworkResponse{})
 }
 
-func (d *driver) CreateEndpoint(nid, eid string, epInfo driverapi.EndpointInfo, epOptions map[string]interface{}) error {
-	var reqIface *api.EndpointInterface
-
-	if epInfo == nil {
-		return fmt.Errorf("must not be called with nil EndpointInfo")
+func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
+	if ifInfo == nil {
+		return fmt.Errorf("must not be called with nil InterfaceInfo")
 	}
 
-	iface := epInfo.Interface()
-	if iface != nil {
-		addr4 := iface.Address()
-		addr6 := iface.AddressIPv6()
-		reqIface = &api.EndpointInterface{
-			Address:     addr4.String(),
-			AddressIPv6: addr6.String(),
-			MacAddress:  iface.MacAddress().String(),
-		}
+	reqIface := &api.EndpointInterface{}
+	if ifInfo.Address() != nil {
+		reqIface.Address = ifInfo.Address().String()
 	}
+	if ifInfo.AddressIPv6() != nil {
+		reqIface.AddressIPv6 = ifInfo.AddressIPv6().String()
+	}
+	if ifInfo.MacAddress() != nil {
+		reqIface.MacAddress = ifInfo.MacAddress().String()
+	}
+
 	create := &api.CreateEndpointRequest{
 		NetworkID:  nid,
 		EndpointID: eid,
@@ -127,24 +128,25 @@ func (d *driver) CreateEndpoint(nid, eid string, epInfo driverapi.EndpointInfo, 
 	if err != nil {
 		return err
 	}
-	if reqIface != nil && inIface != nil {
-		// We're not supposed to add interface if there is already
-		// one. Attempt to roll back
-		return errorWithRollback("driver attempted to add interface ignoring the one provided", d.DeleteEndpoint(nid, eid))
+	if inIface == nil {
+		return errorWithRollback("driver did not return the endpoint interface", d.DeleteEndpoint(nid, eid))
+	}
+	if inIface.MacAddress != nil {
+		if err := ifInfo.SetMacAddress(inIface.MacAddress); err != nil {
+			return errorWithRollback(fmt.Sprintf("driver modified interface MAC address: %v", err), d.DeleteEndpoint(nid, eid))
+		}
+	}
+	if inIface.Address != nil {
+		if err := ifInfo.SetIPAddress(inIface.Address); err != nil {
+			return errorWithRollback(fmt.Sprintf("driver modified interface address: %v", err), d.DeleteEndpoint(nid, eid))
+		}
+	}
+	if inIface.AddressIPv6 != nil {
+		if err := ifInfo.SetIPAddress(inIface.AddressIPv6); err != nil {
+			return errorWithRollback(fmt.Sprintf("driver modified interface address: %v", err), d.DeleteEndpoint(nid, eid))
+		}
 	}
 
-	if inIface != nil {
-		var addr4, addr6 net.IPNet
-		if inIface.Address != nil {
-			addr4 = *(inIface.Address)
-		}
-		if inIface.AddressIPv6 != nil {
-			addr6 = *(inIface.AddressIPv6)
-		}
-		if err := epInfo.AddInterface(inIface.MacAddress, addr4, addr6); err != nil {
-			return errorWithRollback(fmt.Sprintf("failed to AddInterface %v: %s", inIface, err), d.DeleteEndpoint(nid, eid))
-		}
-	}
 	return nil
 }
 

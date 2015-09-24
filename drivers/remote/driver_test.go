@@ -75,27 +75,65 @@ type testEndpoint struct {
 }
 
 func (test *testEndpoint) Interface() driverapi.InterfaceInfo {
+	return test
+}
+
+func (test *testEndpoint) Address() *net.IPNet {
+	if test.address == "" {
+		return &net.IPNet{}
+	}
+	ip, nw, _ := net.ParseCIDR(test.address)
+	nw.IP = ip
+	return nw
+}
+
+func (test *testEndpoint) AddressIPv6() *net.IPNet {
+	if test.addressIPv6 == "" {
+		return &net.IPNet{}
+	}
+	ip, nw, _ := net.ParseCIDR(test.addressIPv6)
+	nw.IP = ip
+	return nw
+}
+
+func (test *testEndpoint) MacAddress() net.HardwareAddr {
+	if test.macAddress == "" {
+		return net.HardwareAddr{}
+	}
+	mac, _ := net.ParseMAC(test.macAddress)
+	return mac
+}
+
+func (test *testEndpoint) SetMacAddress(mac net.HardwareAddr) error {
+	if test.macAddress != "" && test.macAddress != mac.String() {
+		return types.ForbiddenErrorf("endpoint interface MAC address present (%s). Cannot be modified with %s.", test.macAddress, mac)
+	}
+	if mac == nil {
+		return types.BadRequestErrorf("tried to set nil MAC address to endpoint interface")
+	}
+	test.macAddress = mac.String()
 	return nil
 }
 
-func (test *testEndpoint) AddInterface(mac net.HardwareAddr, ipv4 net.IPNet, ipv6 net.IPNet) error {
-	ip4, net4, _ := net.ParseCIDR(test.address)
-	ip6, net6, _ := net.ParseCIDR(test.addressIPv6)
-	if ip4 != nil {
-		net4.IP = ip4
-		if !types.CompareIPNet(net4, &ipv4) {
-			test.t.Fatalf("Wrong address given %+v", ipv4)
+func (test *testEndpoint) SetIPAddress(address *net.IPNet) error {
+	if address.IP == nil {
+		return types.BadRequestErrorf("tried to set nil IP address to endpoint interface")
+	}
+	if address.IP.To4() == nil {
+		return setAddress(&test.addressIPv6, address)
+	}
+	return setAddress(&test.address, address)
+}
+
+func setAddress(ifaceAddr *string, address *net.IPNet) error {
+	if *ifaceAddr != "" {
+		ip, nip, _ := net.ParseCIDR(*ifaceAddr)
+		nip.IP = ip
+		if !types.CompareIPNet(nip, address) {
+			return types.ForbiddenErrorf("endpoint interface IP present (%s). Cannot be modified with (%s).", nip, address)
 		}
 	}
-	if ip6 != nil {
-		net6.IP = ip6
-		if !types.CompareIPNet(net6, &ipv6) {
-			test.t.Fatalf("Wrong address (IPv6) given %+v", ipv6)
-		}
-	}
-	if test.macAddress != "" && mac.String() != test.macAddress {
-		test.t.Fatalf("Wrong MAC address given %v", mac)
-	}
+	*ifaceAddr = address.String()
 	return nil
 }
 
@@ -349,7 +387,7 @@ func TestRemoteDriver(t *testing.T) {
 	}
 
 	netID := "dummy-network"
-	err = d.CreateNetwork(netID, map[string]interface{}{})
+	err = d.CreateNetwork(netID, map[string]interface{}{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,19 +415,6 @@ func TestRemoteDriver(t *testing.T) {
 	if err = d.DeleteNetwork(netID); err != nil {
 		t.Fatal(err)
 	}
-}
-
-type failEndpoint struct {
-	t *testing.T
-}
-
-func (f *failEndpoint) Interfaces() []*driverapi.InterfaceInfo {
-	f.t.Fatal("Unexpected call of Interfaces")
-	return nil
-}
-func (f *failEndpoint) AddInterface(int, net.HardwareAddr, net.IPNet, net.IPNet) error {
-	f.t.Fatal("Unexpected call of AddInterface")
-	return nil
 }
 
 func TestDriverError(t *testing.T) {
@@ -433,7 +458,7 @@ func TestMissingValues(t *testing.T) {
 			"MacAddress":  ep.macAddress,
 		}
 		return map[string]interface{}{
-			"Interfaces": []interface{}{iface},
+			"Interface": iface,
 		}
 	})
 
@@ -452,11 +477,27 @@ type rollbackEndpoint struct {
 }
 
 func (r *rollbackEndpoint) Interface() driverapi.InterfaceInfo {
+	return r
+}
+
+func (r *rollbackEndpoint) MacAddress() net.HardwareAddr {
 	return nil
 }
 
-func (r *rollbackEndpoint) AddInterface(_ net.HardwareAddr, _ net.IPNet, _ net.IPNet) error {
-	return fmt.Errorf("fail this to trigger a rollback")
+func (r *rollbackEndpoint) Address() *net.IPNet {
+	return nil
+}
+
+func (r *rollbackEndpoint) AddressIPv6() *net.IPNet {
+	return nil
+}
+
+func (r *rollbackEndpoint) SetMacAddress(mac net.HardwareAddr) error {
+	return fmt.Errorf("invalid mac")
+}
+
+func (r *rollbackEndpoint) SetIPAddress(ip *net.IPNet) error {
+	return fmt.Errorf("invalid ip")
 }
 
 func TestRollback(t *testing.T) {
@@ -490,7 +531,7 @@ func TestRollback(t *testing.T) {
 
 	ep := &rollbackEndpoint{}
 
-	if err := driver.CreateEndpoint("dummy", "dummy", ep, map[string]interface{}{}); err == nil {
+	if err := driver.CreateEndpoint("dummy", "dummy", ep.Interface(), map[string]interface{}{}); err == nil {
 		t.Fatalf("Expected error from driver")
 	}
 	if !rolledback {

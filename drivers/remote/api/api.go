@@ -4,7 +4,11 @@ with a remote driver.
 */
 package api
 
-import "net"
+import (
+	"net"
+
+	"github.com/docker/libnetwork/ipamapi"
+)
 
 // Response is the basic response structure used in all responses.
 type Response struct {
@@ -30,6 +34,9 @@ type CreateNetworkRequest struct {
 
 	// A free form map->object interface for communication of options.
 	Options map[string]interface{}
+
+	// IPData contains the address pool information for this network
+	IPData []ipamapi.IPData
 }
 
 // CreateNetworkResponse is the response to the CreateNetworkRequest.

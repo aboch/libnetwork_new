@@ -1037,10 +1037,9 @@ func TestEndpointJoin(t *testing.T) {
 
 	// Validate if ep.Info() only gives me IP address info and not names and gateway during CreateEndpoint()
 	info := ep1.Info()
-	if iface := info.Iface(); iface != nil {
-		if iface.Address().IP.To4() == nil {
-			t.Fatalf("Invalid IP address returned: %v", iface.Address())
-		}
+	iface := info.Iface()
+	if iface.Address() != nil && iface.Address().IP.To4() == nil {
+		t.Fatalf("Invalid IP address returned: %v", iface.Address())
 	}
 
 	if info.Gateway().To4() != nil {

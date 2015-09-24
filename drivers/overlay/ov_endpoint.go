@@ -36,7 +36,7 @@ func (n *network) deleteEndpoint(eid string) {
 	n.Unlock()
 }
 
-func (d *driver) CreateEndpoint(nid, eid string, epInfo driverapi.EndpointInfo,
+func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	epOptions map[string]interface{}) error {
 	if err := validateID(nid, eid); err != nil {
 		return err
@@ -51,10 +51,9 @@ func (d *driver) CreateEndpoint(nid, eid string, epInfo driverapi.EndpointInfo,
 		id: eid,
 	}
 
-	if epInfo != nil && epInfo.Interface() != nil {
-		addr := epInfo.Interface().Address()
-		ep.addr = &addr
-		ep.mac = epInfo.Interface().MacAddress()
+	if ifInfo != nil {
+		ep.addr = ifInfo.Address()
+		ep.mac = ifInfo.MacAddress()
 		n.addEndpoint(ep)
 		return nil
 	}
@@ -74,9 +73,13 @@ func (d *driver) CreateEndpoint(nid, eid string, epInfo driverapi.EndpointInfo,
 
 	ep.mac = netutils.GenerateMACFromIP(ep.addr.IP)
 
-	err = epInfo.AddInterface(ep.mac, *ep.addr, net.IPNet{})
+	err = ifInfo.SetMacAddress(ep.mac)
 	if err != nil {
-		return fmt.Errorf("could not add interface to endpoint info: %v", err)
+		return err
+	}
+	err = ifInfo.SetIPAddress(ep.addr)
+	if err != nil {
+		return err
 	}
 
 	n.addEndpoint(ep)

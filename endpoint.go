@@ -10,6 +10,7 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
+	"github.com/docker/libnetwork/ipamapi"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/types"
 )
@@ -423,6 +424,8 @@ func (ep *endpoint) Delete() error {
 		return err
 	}
 
+	ep.releaseAddress()
+
 	return nil
 }
 
@@ -482,7 +485,7 @@ func (ep *endpoint) getFirstInterfaceAddress() net.IP {
 	ep.Lock()
 	defer ep.Unlock()
 
-	if ep.iface != nil {
+	if ep.iface.addr != nil {
 		return ep.iface.addr.IP
 	}
 
@@ -548,4 +551,46 @@ func (ep *endpoint) DataScope() datastore.DataScope {
 
 func (ep *endpoint) isLocalScoped() bool {
 	return ep.DataScope() == datastore.LocalScope
+}
+
+func (ep *endpoint) assignAddress() (err error) {
+	var ipa ipamapi.Allocator
+	n := ep.getNetwork()
+	if n.Type() == "host" || n.Type() == "null" || n.Type() == "bridge" {
+		return
+	}
+	ipa, err = n.ctrlr.getIPAllocator(n.ipamType)
+	if err != nil {
+		return
+	}
+	n.Lock()
+	err = fmt.Errorf("network does not have any ipam info")
+	for _, d := range n.ipamInfo {
+		var addr *net.IPNet
+		addr, _, err = ipa.RequestAddress(d.poolID, nil, nil)
+		if err == nil {
+			ep.Lock()
+			ep.iface.addr = addr
+			ep.iface.poolID = d.poolID
+			ep.Unlock()
+			break
+		}
+		if err != ipamapi.ErrNoAvailableIPs {
+			break
+		}
+	}
+	n.Unlock()
+	return
+}
+
+func (ep *endpoint) releaseAddress() (err error) {
+	n := ep.getNetwork()
+	if n.Type() == "host" || n.Type() == "null" || n.Type() == "bridge" {
+		return
+	}
+	ipa, err := n.ctrlr.getIPAllocator(n.ipamType)
+	if err != nil {
+		return
+	}
+	return ipa.ReleaseAddress(ep.iface.poolID, ep.iface.addr.IP)
 }

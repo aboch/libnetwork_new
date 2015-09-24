@@ -1,6 +1,7 @@
 package libnetwork
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 
@@ -34,19 +35,20 @@ type InterfaceInfo interface {
 	MacAddress() net.HardwareAddr
 
 	// Address returns the IPv4 address assigned to the endpoint.
-	Address() net.IPNet
+	Address() *net.IPNet
 
 	// AddressIPv6 returns the IPv6 address assigned to the endpoint.
-	AddressIPv6() net.IPNet
+	AddressIPv6() *net.IPNet
 }
 
 type endpointInterface struct {
 	mac       net.HardwareAddr
-	addr      net.IPNet
-	addrv6    net.IPNet
+	addr      *net.IPNet
+	addrv6    *net.IPNet
 	srcName   string
 	dstPrefix string
 	routes    []*net.IPNet
+	poolID    string
 }
 
 func (epi *endpointInterface) MarshalJSON() ([]byte, error) {
@@ -76,13 +78,13 @@ func (epi *endpointInterface) UnmarshalJSON(b []byte) (err error) {
 	ip, ipnet, _ := net.ParseCIDR(epMap["addr"].(string))
 	if ipnet != nil {
 		ipnet.IP = ip
-		epi.addr = *ipnet
+		epi.addr = ipnet
 	}
 
 	ip, ipnet, _ = net.ParseCIDR(epMap["addrv6"].(string))
 	if ipnet != nil {
 		ipnet.IP = ip
-		epi.addrv6 = *ipnet
+		epi.addrv6 = ipnet
 	}
 
 	epi.srcName = epMap["srcName"].(string)
@@ -149,17 +151,32 @@ func (ep *endpoint) Interface() driverapi.InterfaceInfo {
 	return nil
 }
 
-func (ep *endpoint) AddInterface(mac net.HardwareAddr, ipv4 net.IPNet, ipv6 net.IPNet) error {
-	ep.Lock()
-	defer ep.Unlock()
-
-	iface := &endpointInterface{
-		addr:   *types.GetIPNetCopy(&ipv4),
-		addrv6: *types.GetIPNetCopy(&ipv6),
+func (epi *endpointInterface) SetMacAddress(mac net.HardwareAddr) error {
+	if epi.mac != nil && !bytes.Equal(epi.mac, mac) {
+		return types.ForbiddenErrorf("endpoint interface MAC address present (%s). Cannot be modified with %s.", epi.mac, mac)
 	}
-	iface.mac = types.GetMacCopy(mac)
+	if mac == nil {
+		return types.BadRequestErrorf("tried to set nil MAC address to endpoint interface")
+	}
+	epi.mac = types.GetMacCopy(mac)
+	return nil
+}
 
-	ep.iface = iface
+func (epi *endpointInterface) SetIPAddress(address *net.IPNet) error {
+	if address.IP == nil {
+		return types.BadRequestErrorf("tried to set nil IP address to endpoint interface")
+	}
+	if address.IP.To4() == nil {
+		return setAddress(&epi.addrv6, address)
+	}
+	return setAddress(&epi.addr, address)
+}
+
+func setAddress(ifaceAddr **net.IPNet, address *net.IPNet) error {
+	if *ifaceAddr != nil && !types.CompareIPNet(*ifaceAddr, address) {
+		return types.ForbiddenErrorf("endpoint interface IP present (%s). Cannot be modified with (%s).", *ifaceAddr, address)
+	}
+	*ifaceAddr = types.GetIPNetCopy(address)
 	return nil
 }
 
@@ -167,12 +184,12 @@ func (epi *endpointInterface) MacAddress() net.HardwareAddr {
 	return types.GetMacCopy(epi.mac)
 }
 
-func (epi *endpointInterface) Address() net.IPNet {
-	return (*types.GetIPNetCopy(&epi.addr))
+func (epi *endpointInterface) Address() *net.IPNet {
+	return types.GetIPNetCopy(epi.addr)
 }
 
-func (epi *endpointInterface) AddressIPv6() net.IPNet {
-	return (*types.GetIPNetCopy(&epi.addrv6))
+func (epi *endpointInterface) AddressIPv6() *net.IPNet {
+	return types.GetIPNetCopy(epi.addrv6)
 }
 
 func (epi *endpointInterface) SetNames(srcName string, dstPrefix string) error {
