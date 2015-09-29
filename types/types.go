@@ -278,6 +278,15 @@ func GetBroadcastIP(ip net.IP, mask net.IPMask) (net.IP, error) {
 	return out, nil
 }
 
+// ParseCIDR returns the *net.IPNet represented by the passed CIDR notation
+func ParseCIDR(cidr string) (n *net.IPNet, e error) {
+	var i net.IP
+	if i, n, e = net.ParseCIDR(cidr); e == nil {
+		n.IP = i
+	}
+	return
+}
+
 const (
 	// NEXTHOP indicates a StaticRoute with an IP next hop.
 	NEXTHOP = iota

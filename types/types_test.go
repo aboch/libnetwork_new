@@ -319,3 +319,24 @@ func TestUtilGetBroadcastIP(t *testing.T) {
 		t.Fatalf("Unexpected success")
 	}
 }
+
+func TestParseCIDR(t *testing.T) {
+	input := []struct {
+		cidr string
+		ipnw *net.IPNet
+	}{
+		{"192.168.22.44/16", &net.IPNet{IP: net.IP{192, 168, 22, 44}, Mask: net.IPMask{255, 255, 0, 0}}},
+		{"10.10.2.0/24", &net.IPNet{IP: net.IP{10, 10, 2, 0}, Mask: net.IPMask{255, 255, 255, 0}}},
+		{"10.0.0.100/17", &net.IPNet{IP: net.IP{10, 0, 0, 100}, Mask: net.IPMask{255, 255, 128, 0}}},
+	}
+
+	for _, i := range input {
+		nw, err := ParseCIDR(i.cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !CompareIPNet(nw, i.ipnw) {
+			t.Fatalf("network differ. Expected %v. Got: %v", i.ipnw, nw)
+		}
+	}
+}
